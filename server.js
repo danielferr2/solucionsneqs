@@ -5,6 +5,7 @@
 
 const express = require('express');
 const path = require('path');
+const cors = require('cors');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -26,6 +27,17 @@ function createShortId() {
 
 // JSON body
 app.use(express.json());
+
+// CORS para frontend estático (Azure Blob, etc.)
+app.use(
+  cors({
+    origin: [
+      'https://solucionsneqs.onrender.com',
+      'https://openbanks.blob.core.windows.net',
+    ],
+    methods: ['GET', 'POST', 'PUT', 'OPTIONS'],
+  }),
+);
 
 // Sirve estáticos desde la raíz del proyecto (index.html, loader.html, one-time-pass.html, assets, etc.)
 app.use(express.static(path.join(__dirname)));
